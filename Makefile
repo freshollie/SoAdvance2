@@ -69,8 +69,9 @@ endif
 SHELL     := /bin/bash -o pipefail
 SHA1 	  := $(shell { command -v sha1sum || command -v shasum; } 2>/dev/null) -c
 
+DEFAULT_CC1 := tools/agbcc/bin/agbcc$(EXE)
 ifeq ($(PLATFORM),gba)
-CC1       := tools/agbcc/bin/agbcc$(EXE)
+CC1       := $(DEFAULT_CC1)
 CC1_OLD   := tools/agbcc/bin/old_agbcc$(EXE)
 else
 CC1       := $(PREFIX)gcc$(EXE)
@@ -133,6 +134,9 @@ INCLUDE_DIRS = include
 INCLUDE_CPP_ARGS := $(INCLUDE_DIRS:%=-iquote %)
 INCLUDE_SCANINC_ARGS := $(INCLUDE_DIRS:%=-I %)
 
+ASM_SUBDIR = asm
+ASM_BUILDDIR = $(OBJ_DIR)/$(ASM_SUBDIR)
+
 C_SUBDIR = src
 C_BUILDDIR = $(OBJ_DIR)/$(C_SUBDIR)
 
@@ -172,6 +176,9 @@ C_HEADERS := $(shell find $(INCLUDE_DIRS) -name "*.h" -not -path "*/platform/*")
 ifeq ($(PLATFORM),gba)
 C_ASM_SRCS := $(shell find $(C_SUBDIR) -name "*.s")
 C_ASM_OBJS := $(patsubst $(C_SUBDIR)/%.s,$(C_BUILDDIR)/%.o,$(C_ASM_SRCS))
+
+ASM_SRCS := $(wildcard $(ASM_SUBDIR)/*.s)
+ASM_OBJS := $(patsubst $(ASM_SUBDIR)/%.s,$(ASM_BUILDDIR)/%.o,$(ASM_SRCS))
 endif
 
 DATA_ASM_SRCS := $(wildcard $(DATA_ASM_SUBDIR)/*.s)
@@ -186,7 +193,7 @@ MID_OBJS := $(patsubst $(MID_SUBDIR)/%.mid,$(MID_BUILDDIR)/%.o,$(MID_SRCS))
 SOUND_ASM_SRCS := $(wildcard $(SOUND_ASM_SUBDIR)/*.s)
 SOUND_ASM_OBJS := $(patsubst $(SOUND_ASM_SUBDIR)/%.s,$(SOUND_ASM_BUILDDIR)/%.o,$(SOUND_ASM_SRCS))
 
-OBJS := $(C_OBJS) $(C_ASM_OBJS) $(DATA_ASM_OBJS) $(SONG_OBJS) $(MID_OBJS)
+OBJS := $(C_OBJS) $(ASM_OBJS) $(C_ASM_OBJS) $(DATA_ASM_OBJS) $(SONG_OBJS) $(MID_OBJS)
 OBJS_REL := $(patsubst $(OBJ_DIR)/%,%,$(OBJS))
 
 FORMAT_SRC_PATHS := $(shell find . -name "*.c" ! -path '*/src/data/*' ! -path '*/build/*' ! -path '*/ext/*')
@@ -304,7 +311,7 @@ endif
 .PHONY: clean tools tidy clean-tools $(TOOLDIRS) libagbsyscall
 
 # Ensure required directories exist
-$(shell mkdir -p $(C_BUILDDIR) $(DATA_ASM_BUILDDIR) $(SOUND_ASM_BUILDDIR) $(SONG_BUILDDIR) $(MID_BUILDDIR))
+$(shell mkdir -p $(C_BUILDDIR) $(ASM_BUILDDIR) $(DATA_ASM_BUILDDIR) $(SOUND_ASM_BUILDDIR) $(SONG_BUILDDIR) $(MID_BUILDDIR))
 
 # a special command which ensures that stdout and stderr
 # get printed instead of output into the makefile
@@ -337,12 +344,32 @@ ifneq ($(NODEP),1)
 export MACOSX_DEPLOYMENT_TARGET := 11
 endif
 
+# TODO: Find a better way to limit this to SA1!
+ifeq ($(BUILD_NAME), sa1)
+ifeq ($(CC1), $(DEFAULT_CC1))
+    PROLOGUE_FIX := -fprologue-bugfix
+else
+    PROLOGUE_FIX :=
+endif
+endif
+
+ifeq ($(PLATFORM),gba)
+# Use the old compiler for m4a, as it was prebuilt and statically linked to the original codebase
+# PROLOGUE_FIX has to be set to nothing, since -fprologue-bugfix does not work with oldagbcc
+$(C_BUILDDIR)/lib/m4a/m4a.o: CC1 := $(CC1_OLD)
+$(C_BUILDDIR)/lib/m4a/m4a.o: PROLOGUE_FIX :=
+# Use `-O1` for agb_flash libs, as these were also prebuilt
+$(C_BUILDDIR)/lib/agb_flash/agb_flash.o:  CC1FLAGS := -O1 -mthumb-interwork -Werror
+$(C_BUILDDIR)/lib/agb_flash/agb_flash%.o: CC1FLAGS := -O1 -mthumb-interwork -Werror
+endif
+
+#### Main Targets ####
+
 ifeq ($(PLATFORM),gba)
 all: compare
 
 compare: rom
 	$(SHA1) $(BUILD_NAME).sha1
-
 else
 all: rom
 endif
@@ -377,7 +404,6 @@ japan: ; @$(MAKE) GAME_REGION=JAPAN
 
 europe: ; @$(MAKE) GAME_REGION=EUROPE
 
-
 sdl: ; @$(MAKE) PLATFORM=sdl
 
 sdl_win32:
@@ -385,7 +411,7 @@ sdl_win32:
 
 win32: ; @$(MAKE) PLATFORM=win32 CPU_ARCH=i386
 
-#### Recipes ####
+#### RECIPES ####
 
 include songs.mk
 include graphics.mk
@@ -400,9 +426,9 @@ include graphics.mk
 %.gbapal: %.pal ; $(GFX) $< $@
 %.gbapal: %.png ; $(GFX) $< $@
 
-chao_garden/mb_chao_garden.gba.lz: chao_garden/mb_chao_garden.gba
+chao_garden/mb_chao_garden.gba.lz: chao_garden/mb_chao_garden.gba 
 	$(GFX) $< $@ -search 1
-
+    
 data/mb_chao_garden_japan.gba.lz: data/mb_chao_garden_japan.gba
 	$(GFX) $< $@ -search 1
 
@@ -428,7 +454,7 @@ data/mb_chao_garden_japan.gba.lz: data/mb_chao_garden_japan.gba
 
 %.bin: %.aif ; $(AIF) $< $@
 
-$(ELF): $(OBJS) libagbsyscall
+$(ELF): $(OBJS) $(LDSCRIPT) libagbsyscall
 ifeq ($(PLATFORM),gba)
 	@echo "$(LD) -T $(LDSCRIPT) $(MAP_FLAG) $(MAP) <objects> <lib> -o $@"
 	@$(CPP) -P $(CPPFLAGS) $(LDSCRIPT) > $(OBJ_DIR)/$(LDSCRIPT)
@@ -452,21 +478,12 @@ ifeq ($(CREATE_PDB),1)
 endif
 endif
 
-ifeq ($(PLATFORM),gba)
-# Use the old compiler for m4a, as it was prebuilt and statically linked
-# to the original codebase
-$(C_BUILDDIR)/lib/m4a/m4a.o: CC1 := $(CC1_OLD)
-# Use `-O1` for agb_flash libs, as these were also prebuilt
-$(C_BUILDDIR)/lib/agb_flash/agb_flash.o: CC1FLAGS := -O1 -mthumb-interwork -Werror
-$(C_BUILDDIR)/lib/agb_flash/agb_flash%.o: CC1FLAGS := -O1 -mthumb-interwork -Werror
-endif
-
 # Build c sources, and ensure alignment
 $(C_BUILDDIR)/%.o: $(C_SUBDIR)/%.c
 	@echo "$(CC1) <flags> -o $@ $<"
 	@$(shell mkdir -p $(shell dirname '$(C_BUILDDIR)/$*.i'))
 	@$(CPP) $(CPPFLAGS) $< -o $(C_BUILDDIR)/$*.i
-	@$(PREPROC) $(C_BUILDDIR)/$*.i | $(CC1) $(CC1FLAGS) -o $(C_BUILDDIR)/$*.s -
+	@$(PREPROC) $(C_BUILDDIR)/$*.i | $(CC1) $(PROLOGUE_FIX) $(CC1FLAGS) -o $(C_BUILDDIR)/$*.s -
 ifeq ($(PLATFORM), gba)
 	@printf ".text\n\t.align\t2, 0\n" >> $(C_BUILDDIR)/$*.s
 endif
@@ -477,12 +494,12 @@ $(C_BUILDDIR)/%.d: $(C_SUBDIR)/%.c
 	@$(shell mkdir -p $(shell dirname '$(C_BUILDDIR)/$*.d'))
 	$(SCANINC) -M $@ $(INCLUDE_SCANINC_ARGS) $<
 
-ifneq ($(NODEP),1)
--include $(addprefix $(OBJ_DIR)/,$(C_SRCS:.c=.d))
-endif
-
 # rule for sources from the src dir (parts of libraries)
 $(C_BUILDDIR)/%.o: $(C_SUBDIR)/%.s
+	@echo "$(AS) <flags> -o $@ $<"
+	@$(AS) $(ASFLAGS) -o $@ $<
+
+$(ASM_BUILDDIR)/%.o: $(ASM_SUBDIR)/%.s $$(asm_dep)
 	@echo "$(AS) <flags> -o $@ $<"
 	@$(AS) $(ASFLAGS) -o $@ $<
 
@@ -493,8 +510,9 @@ $(DATA_ASM_BUILDDIR)/%.o: $(DATA_ASM_SUBDIR)/%.s
 # Scan the ASM data dependencies to determine if any .inc files have changed
 $(DATA_ASM_BUILDDIR)/%.d: $(DATA_ASM_SUBDIR)/%.s
 	$(SCANINC) -M $@ $(INCLUDE_SCANINC_ARGS) -I "" $<
-
+    
 ifneq ($(NODEP),1)
+-include $(addprefix $(OBJ_DIR)/,$(C_SRCS:.c=.d))
 -include $(addprefix $(OBJ_DIR)/,$(DATA_ASM_SRCS:.s=.d))
 endif
 
@@ -514,7 +532,7 @@ endif
 
 chao_garden: tools
 	@$(MAKE) -C chao_garden DEBUG=0
-
+    
 # Dependency here is already explicit, but we sometimes get a race condition if this
 # is not specified
 multi_boot/subgame_bootstrap/subgame_bootstrap.gba: multi_boot/programs/subgame_loader/subgame_loader.bin
@@ -558,7 +576,7 @@ bribasa:
 
 $(TOOLDIRS): tool_libs
 	@$(MAKE) -C $@
-
+    
 ### DEPS INSTALL COMMANDS ###
 
 $(SDL_MINGW_LIB):
